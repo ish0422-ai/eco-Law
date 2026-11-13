@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1f6f43">
+<meta name="description" content="친환경농업 법령·고시·세부지침 오프라인 검색">
+<title>친환경농업 법령 검색</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <section id="listPane" aria-label="검색과 목록">
+    <header class="bar">
+      <div class="searchRow">
+        <input id="q" type="search" inputmode="search" enterkeyhint="search" autocomplete="off"
+               placeholder="키워드 또는 조번호 (예: 인증취소, 제19조)" aria-label="검색어">
+        <button id="btnSettings" class="icon" aria-label="설정" title="설정">⚙</button>
+      </div>
+      <div class="chips" id="kindChips" role="tablist" aria-label="자료 종류">
+        <button data-kind="" class="on">전체</button>
+        <button data-kind="법령">법령</button>
+        <button data-kind="고시">고시</button>
+        <button data-kind="세부지침">세부지침</button>
+      </div>
+      <select id="lawSel" aria-label="법령별 필터"></select>
+    </header>
+    <div id="list" class="scroll" tabindex="-1"></div>
+  </section>
+
+  <section id="detailPane" aria-label="본문">
+    <div id="detail" class="scroll" tabindex="-1"></div>
+  </section>
+</div>
+
+<footer id="notice">2025.12.30. 발간 법령집 기준, 최신 내용은 법제처에서 확인</footer>
+
+<div id="settings" class="sheet" hidden>
+  <div class="sheetBody" role="dialog" aria-label="설정">
+    <h2>설정</h2>
+    <div class="row"><span>글자 크기</span>
+      <span class="grp"><button id="fsDown" aria-label="글자 작게">가−</button><b id="fsVal"></b><button id="fsUp" aria-label="글자 크게">가＋</button></span></div>
+    <div class="row"><span>화면 모드</span>
+      <span class="grp" id="themeGrp"><button data-theme="auto">시스템</button><button data-theme="light">밝게</button><button data-theme="dark">어둡게</button></span></div>
+    <div class="row col"><span>오프라인 저장</span>
+      <p id="offState" class="muted"></p>
+      <button id="offBtn" class="wide">별표·서식 이미지 내려받기</button>
+      <progress id="offProg" max="1" value="0" hidden></progress></div>
+    <p class="muted small" id="about"></p>
+    <button id="setClose" class="wide primary">닫기</button>
+  </div>
+</div>
+
+<div id="viewer" hidden>
+  <div class="vbar"><span id="vcap"></span>
+    <span class="grp"><button id="vOut" aria-label="축소">−</button><button id="vIn" aria-label="확대">＋</button><button id="vClose" aria-label="닫기">닫기</button></span></div>
+  <div id="vscroll"><img id="vimg" alt=""></div>
+</div>
+<div id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
