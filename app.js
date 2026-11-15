@@ -61,7 +61,9 @@ async function init() {
   renderList();
   $('#about').textContent = `자료: ${S.meta.source} · 항목 ${S.items.length.toLocaleString()}건 · 앱 ${APP_VERSION}`;
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-    navigator.serviceWorker.register('sw.js').then(updateOfflineState).catch(() => updateOfflineState());
+    const hadSW = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadSW) location.reload(); });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(updateOfflineState).catch(() => updateOfflineState());
   } else updateOfflineState();
 }
 
@@ -269,7 +271,16 @@ function linkify(it, text, re) {
   return segs.map(([t, id]) => (id ? `<a class="ref" href="#/i/${id}" title="${esc(refTitle(id))}">${mark(t, re)}</a>` : mark(t, re))).join('');
 }
 function refTitle(id) { const t = S.byId.get(id), l = S.lawById.get(t.law); return `${l.short} ${t.no} ${t.title}`; }
-function paraClass(p, guide) {
+function paraClass(p, guide, att) {
+  if (att) {                                  // 옮겨 적은 별표: 1. / 가. / 1) / 가) / (1) 단계
+    if (/^\d+\.\s/.test(p)) return 'l1';
+    if (/^[가-하]\.\s/.test(p)) return 'l2';
+    if (/^\d+\)\s/.test(p)) return 'l3';
+    if (/^[가-하]\)\s/.test(p)) return 'l4';
+    if (/^\(\d+\)\s|^\([가-하]\)\s/.test(p)) return 'l5';
+    if (/^[※*]/.test(p)) return 'l2 note';
+    return '';
+  }
   if (guide) {
     if (/^[ㅇ◦○□◈]|^o\s/.test(p)) return 'l1';
     if (/^[-–·∙▪→]/.test(p)) return 'l2';
@@ -308,7 +319,7 @@ function renderDetail() {
     <span class="sp"></span><button id="copy">복사</button><button id="fav" class="fav${fav ? ' on' : ''}" aria-pressed="${fav}">${fav ? '★' : '☆'} 즐겨찾기</button></div>`;
   h += `<article><div class="crumb"><span class="badge k-${it.kind}">${it.kind}</span>${guide ? `<span class="badge">${esc(it.field)}</span>` : ''}
     <a href="#" data-law="${law.id}">${esc(law.short)}</a>${it.chapter ? `<span>› ${esc(it.chapter)}</span>` : ''}</div>
-    <h1>${it.no ? `<span class="no">${esc(it.no)}</span>` : ''}${guide ? linkify(it, it.title, re) : mark(it.title, re)}</h1>
+    <h1>${it.no ? `<span class="no">${esc(it.no)}</span>` : ''}${(guide || it.textified) ? linkify(it, it.title, re) : mark(it.title, re)}</h1>
     <p class="meta">${esc(pageLabel(it))}${guide ? ' · ' + esc(lawDate(law)) : ''}${it.variant ? ` · <span class="tag">${esc(it.variant)} 시행 예정 조문</span>` : ''}</p>`;
   if (guide) {
     h += `<div class="banner">${esc(S.meta.guideNotice || '2022.6. 기준 자료이며 법령·고시와 다를 경우 법령·고시가 우선')}</div>`;
@@ -316,22 +327,32 @@ function renderDetail() {
   }
   if (it.variant) h += '<div class="banner">같은 조번호의 현행 조문이 바로 앞에 실려 있습니다. 이 항목은 법령집에 함께 실린 장래 시행분입니다.</div>';
   if (it.body) {
-    h += '<div class="body">' + it.body.split('\n').map((p) => `<p class="${paraClass(p, guide)}">${linkify(it, p, re)}</p>`).join('') + '</div>';
+    h += `<div class="body${it.textified ? ' att' : ''}">` + it.body.split('\n').map((p) => `<p class="${paraClass(p, guide, it.textified)}">${linkify(it, p, re)}</p>`).join('') + '</div>';
   }
   if (it.images && it.images.length) {
-    const ocrNote = guide ? '표·그림이 있는 쪽은 원문 이미지로 보여 줍니다.' : '별표·서식은 법령집 쪽 이미지입니다. 검색은 글자 인식(OCR) 결과로 하므로 일부 누락될 수 있습니다.';
-    h += `<p class="meta">${ocrNote} 이미지를 누르면 크게 볼 수 있습니다.</p>`;
-    if (re && it.ocr) {
-      const hits = [];
-      const flat = it.ocr.split('\n');
-      for (const line of flat) { re.lastIndex = 0; if (re.test(line)) { hits.push(line); if (hits.length >= 6) break; } }
-      if (hits.length) h += `<div class="ocrBox"><h3>검색어가 들어 있는 줄 (${guide ? '표 안 텍스트' : 'OCR'})</h3>${hits.map((x) => `<p>${mark(x, re)}</p>`).join('')}</div>`;
-    }
-    h += it.images.map((src, i) => {
-      const pg = guide ? (it.imagePages ? it.imagePages[i] : '') : parseInt(src.replace(/\D/g, ''), 10);
+    const figs = it.images.map((src, i) => {
+      const pg = guide ? (it.imagePages ? it.imagePages[i] : '') : parseInt(src.replace(/^\D*/, ''), 10);
       const cap = `${guide ? '모음집' : '법령집'} p.${pg} (${i + 1}/${it.images.length})`;
-      return `<figure><img loading="lazy" src="${src}" alt="${esc(it.no + ' ' + it.title)} ${cap}" data-cap="${esc(cap)}"><figcaption>${cap}</figcaption></figure>`;
+      const sz = it.imgSize && it.imgSize[i] ? ` width="${it.imgSize[i][0]}" height="${it.imgSize[i][1]}"` : '';
+      return `<figure${it.hd ? ' class="hd"' : ''}><img loading="lazy" decoding="async"${sz} src="${src}" alt="${esc(it.no + ' ' + it.title)} ${cap}" data-cap="${esc(cap)}"><figcaption>${cap}</figcaption></figure>`;
     }).join('');
+    if (it.textified) {
+      // 옮겨 적은 별표: 원문 이미지는 접어 두고(열 때 불러옴) 대조용으로만
+      h += `<details class="orig"><summary>원문 이미지 보기 (${esc(pageLabel(it))})</summary>
+        <p class="meta">본문은 이 원문 이미지를 보고 옮겨 적은 것입니다. 다른 점이 있으면 원문이 우선입니다.</p>${figs}</details>`;
+    } else {
+      const ocrNote = guide ? '표·그림이 있는 쪽은 원문 이미지로 보여 줍니다.'
+        : it.hd ? '표 형식 별표는 법령집 원문을 고해상도 이미지로 보여 줍니다. 두 손가락으로 벌리거나 이미지를 누르면 크게 볼 수 있습니다. 검색은 글자 인식(OCR) 결과로 하므로 일부 누락될 수 있습니다.'
+          : '별표·서식은 법령집 쪽 이미지입니다. 검색은 글자 인식(OCR) 결과로 하므로 일부 누락될 수 있습니다.';
+      h += `<p class="meta">${ocrNote}${it.hd ? '' : ' 이미지를 누르면 크게 볼 수 있습니다.'}</p>`;
+      if (re && it.ocr) {
+        const hits = [];
+        const flat = it.ocr.split('\n');
+        for (const line of flat) { re.lastIndex = 0; if (re.test(line)) { hits.push(line); if (hits.length >= 6) break; } }
+        if (hits.length) h += `<div class="ocrBox"><h3>검색어가 들어 있는 줄 (${guide ? '표 안 텍스트' : 'OCR'})</h3>${hits.map((x) => `<p>${mark(x, re)}</p>`).join('')}</div>`;
+      }
+      h += figs;
+    }
   }
   if (LAWGO[law.id]) h += `<p class="meta"><a href="${LAWGO[law.id]}" target="_blank" rel="noopener">국가법령정보센터에서 ${esc(law.short)} 최신 내용 보기 ↗</a></p>`;
   const nb = (x, label) => (x ? `<button data-go="${x.id}"><small>${label}</small><span>${esc((x.no + ' ' + x.title).trim())}</span></button>` : '<button disabled><small>' + label + '</small><span>없음</span></button>');
@@ -376,9 +397,45 @@ function route() {
     if (id) { const b = document.querySelector(`#list .item[data-id="${CSS.escape(id)}"]`); if (b) b.classList.add('sel'); }
   }
 }
+/* 확대 보기: 두 손가락 벌리기·좁히기, 두 번 누르기, ＋/− 버튼, Ctrl+휠 */
+const V = { scale: 1, pinch: null };
+function setScale(s, px, py) {
+  const sc = $('#vscroll'), im = $('#vimg');
+  s = Math.max(1, Math.min(5, s));
+  const old = V.scale;
+  if (Math.abs(s - old) < 0.001) return;
+  const r = sc.getBoundingClientRect();
+  if (px === undefined) { px = r.width / 2; py = r.height / 2; }
+  const ax = (sc.scrollLeft + px) / old, ay = (sc.scrollTop + py) / old;   // 손가락 아래 지점을 고정
+  V.scale = s; im.style.width = (s * 100) + '%';
+  sc.scrollLeft = ax * s - px; sc.scrollTop = ay * s - py;
+}
 function openViewer(src, cap) {
+  V.scale = 1; V.pinch = null;
   $('#vimg').src = src; $('#vimg').style.width = '100%'; $('#vcap').textContent = cap; $('#viewer').hidden = false;
+  $('#vscroll').scrollTop = 0; $('#vscroll').scrollLeft = 0;
   history.pushState(null, '', location.hash + '/v');
+}
+function bindPinch() {
+  const sc = $('#vscroll');
+  const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  const mid = (t) => { const r = sc.getBoundingClientRect(); return [(t[0].clientX + t[1].clientX) / 2 - r.left, (t[0].clientY + t[1].clientY) / 2 - r.top]; };
+  sc.addEventListener('touchstart', (e) => { if (e.touches.length === 2) V.pinch = { d: dist(e.touches), s: V.scale }; }, { passive: true });
+  sc.addEventListener('touchmove', (e) => {
+    if (e.touches.length !== 2 || !V.pinch) return;
+    e.preventDefault();
+    const [mx, my] = mid(e.touches);
+    setScale(V.pinch.s * dist(e.touches) / V.pinch.d, mx, my);
+  }, { passive: false });
+  sc.addEventListener('touchend', (e) => { if (e.touches.length < 2) V.pinch = null; });
+  sc.addEventListener('dblclick', (e) => { const r = sc.getBoundingClientRect(); setScale(V.scale > 1.2 ? 1 : 2.5, e.clientX - r.left, e.clientY - r.top); });
+  sc.addEventListener('wheel', (e) => { if (!e.ctrlKey) return; e.preventDefault(); const r = sc.getBoundingClientRect(); setScale(V.scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15), e.clientX - r.left, e.clientY - r.top); }, { passive: false });
+  // 본문 속 이미지 위에서 두 손가락을 대면 바로 확대 보기로 넘어간다
+  $('#detail').addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 2) return;
+    const img = e.touches[0].target.closest && e.touches[0].target.closest('figure img');
+    if (img) { e.preventDefault(); openViewer(img.getAttribute('src'), img.dataset.cap); }
+  }, { passive: false });
 }
 function closeViewer(fromPop) { $('#viewer').hidden = true; if (!fromPop && /\/v$/.test(location.hash)) history.back(); }
 
@@ -472,10 +529,9 @@ function bind() {
   $('#themeGrp').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { store.set('theme', b.dataset.theme); applyPrefs(); } });
   $('#offBtn').addEventListener('click', downloadImages);
   $('#vClose').addEventListener('click', () => closeViewer(false));
-  const zoom = (f) => { const im = $('#vimg'); const w = Math.max(100, Math.min(400, (parseFloat(im.style.width) || 100) * f)); im.style.width = w + '%'; };
-  $('#vIn').addEventListener('click', () => zoom(1.4));
-  $('#vOut').addEventListener('click', () => zoom(1 / 1.4));
-  $('#vimg').addEventListener('dblclick', () => zoom(($('#vimg').style.width === '100%') ? 2 : 0.01));
+  $('#vIn').addEventListener('click', () => setScale(V.scale * 1.4));
+  $('#vOut').addEventListener('click', () => setScale(V.scale / 1.4));
+  bindPinch();
 }
 function renderDetailKeepScroll() { const el = $('#detail'), y = el.scrollTop; const r = S.results; S.results = null; renderDetail(); S.results = r; el.scrollTop = y; }
 
