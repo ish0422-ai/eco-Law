@@ -147,3 +147,8 @@ progress { width: 100%; }
 #vscroll { flex: 1; overflow: auto; background: #555; touch-action: pan-x pan-y; overscroll-behavior: contain; }
 #vimg { display: block; width: 100%; max-width: none; height: auto; background: #fff; }
 #toast { position: fixed; left: 50%; bottom: 3.2em; transform: translateX(-50%); background: #222; color: #fff; padding: .5em 1em; border-radius: 999px; font-size: .88em; z-index: 40; }
+.sec.part { margin-top: 6px; border-top: 1px solid var(--line, #ddd); } .sec small { font-weight: 400; }
+button.sec.toggle { display: block; width: 100%; text-align: left; background: none; border: 0; border-top: 1px solid var(--line); font: inherit; font-size: .8em; font-weight: 700; color: var(--accent); cursor: pointer; padding: 12px; }
+details.ocrd > summary small { font-weight: 400; color: var(--muted); margin-left: .5em; }
+details.ocrd p { margin: .3em 0; font-size: .85em; color: var(--muted); word-break: break-all; }
+#changelog .cl { margin: 6px 0 10px; font-size: .88em; } #changelog ul { margin: 2px 0 0; padding-left: 1.2em; } #changelog li { margin: 2px 0; }

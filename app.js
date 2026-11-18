@@ -1,10 +1,16 @@
 /* 친환경농업 법령 검색 — 서버 없이 동작하는 PWA */
 'use strict';
-const APP_VERSION = '1.0.0';
+let VER = { version: '', changelog: [] };   // version.json에서 읽음(버전의 유일한 원본)
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const DOTS = '·ㆍ‧・∙･⋅';
 const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, '').replace(new RegExp('[' + DOTS + ']', 'g'), '·');
+/* 검색용 정규화: 공백, 가운뎃점, 낫표(「」『』), 괄호 속 한자·영문 "(不時)"을 없애고 비교한다 */
+const QUOTES = '「」『』';
+const NOISE_PAREN = '\\([\\u3400-\\u9fff\\uf900-\\ufaffA-Za-z\\s·,.\\-]*\\)';
+const PAREN_RE = new RegExp(NOISE_PAREN, 'g');
+const SKIP_RE = new RegExp('[\\s' + DOTS + QUOTES + ']+', 'g');
+const snorm = (s) => String(s || '').toLowerCase().replace(PAREN_RE, '').replace(SKIP_RE, '');
 
 /* 국가법령정보센터 링크 (법령명으로 바로 가는 주소) */
 const LAWGO = {
@@ -27,7 +33,7 @@ const ECO = { 법: 'act', 영: 'decree', 규칙: 'rule' }, LIVE = { 법: 'lact',
 const FAMILY = { act: ECO, decree: ECO, rule: ECO, n1: ECO, n2: ECO, n3: ECO, n4: ECO, n5: ECO, lact: LIVE, ldecree: LIVE, lrule: LIVE, m1: LIVE, m2: LIVE };
 
 const S = { laws: [], items: [], byId: new Map(), lawById: new Map(), q: '', kind: '', law: '', limit: 60, cur: null,
-  fav: new Set(), results: null };
+  fav: new Set(), results: null, limitP: 15, partOpen: false };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 저장 불가 환경 */ } },
@@ -44,22 +50,24 @@ async function init() {
     $('#list').innerHTML = '<div class="empty">자료를 불러오지 못했습니다.<br>인터넷에 연결된 상태에서 한 번 열어 주세요.</div>';
     return;
   }
+  try { VER = await (await fetch('version.json', { cache: 'no-cache' })).json(); } catch (e) { /* 끊긴 상태에서 저장본이 없으면 버전 표시만 생략 */ }
   S.meta = data.meta; S.laws = data.laws; S.items = data.items;
   S.laws.forEach((l) => S.lawById.set(l.id, l));
   S.items.forEach((it, i) => {
     it._i = i; S.byId.set(it.id, it);
     const law = S.lawById.get(it.law);
-    it._nt = norm(law.short + it.no + it.title + (it.chapter || ''));
+    it._nt = snorm(law.short + it.no + it.title + (it.chapter || ''));
     it._nno = norm(it.no);
-    it._nb = norm(it.body);
-    it._no = norm(it.ocr);
+    it._nb = snorm(it.body);
+    it._no = snorm(it.ocr);
   });
   S.fav = new Set(store.get('fav', []).filter((id) => S.byId.has(id)));
   buildLawSelect();
   bind();
   route();
   renderList();
-  $('#about').textContent = `자료: ${S.meta.source} · 항목 ${S.items.length.toLocaleString()}건 · 앱 ${APP_VERSION}`;
+  $('#about').textContent = `자료: ${S.meta.source} · 항목 ${S.items.length.toLocaleString()}건 · 앱 ${VER.version || '?'}`;
+  renderChangelog(); checkUpdated();
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
     const hadSW = !!navigator.serviceWorker.controller;
     navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadSW) location.reload(); });
@@ -80,13 +88,19 @@ function buildLawSelect() {
 
 /* ───────── 검색 ───────── */
 function reChar(c) { return DOTS.includes(c) ? '[' + DOTS + ']' : c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-function looseRe(text) {              // 띄어쓰기와 가운뎃점 종류를 무시하는 정규식
-  const cs = Array.from(text.replace(/\s+/g, ''));
+function looseRe(text) {              // 공백·가운뎃점·낫표·괄호 속 한자를 사이에 끼워도 같은 글자열로 본다
+  const cs = Array.from(snorm(text));
   if (!cs.length) return null;
-  return cs.map(reChar).join('\\s*');
+  const gap = '(?:[\\s' + DOTS + QUOTES + ']|' + NOISE_PAREN + ')*';
+  return cs.map(reChar).join(gap);
 }
-function hlRegex(q) {
-  const parts = [q].concat(q.trim().split(/\s+/)).map(looseRe).filter(Boolean);
+function queryParts(q) {
+  const toks = Array.from(new Set(q.trim().split(/\s+/).map(snorm).filter(Boolean)));
+  return { phrase: snorm(q), toks };
+}
+function hlRegex(q, phraseOnly) {
+  const { toks } = queryParts(q);
+  const parts = (phraseOnly ? [q] : [q].concat(toks)).map(looseRe).filter(Boolean);
   const uniq = Array.from(new Set(parts)).sort((a, b) => b.length - a.length);
   return uniq.length ? new RegExp('(' + uniq.join('|') + ')', 'gi') : null;
 }
@@ -107,10 +121,9 @@ function search() {
   const q = S.q.trim();
   if (!q) return null;
   const pool = scope();
-  const phrase = norm(q);
-  const toks = q.split(/\s+/).map(norm).filter(Boolean);
+  const { phrase, toks } = queryParts(q);
   const art = parseArticleQuery(q);
-  const exact = [], text = [];
+  const exact = [], text = [], part = [];
   for (const it of pool) {
     if (art && it._nno === art.no) {
       const law = S.lawById.get(it.law);
@@ -118,19 +131,24 @@ function search() {
           (art.hint === '법' && /^(act|lact)$/.test(it.law)) || (/^(규칙|시행규칙)$/.test(art.hint) && /rule$/.test(it.law)) ||
           (/^(영|시행령)$/.test(art.hint) && /decree$/.test(it.law))) { exact.push({ it, where: 'no', score: 1000 }); continue; }
     }
-    let score = 0, where = '';
-    if (it._nt.includes(phrase)) { score = 500; where = 'title'; }
-    else if (it._nb.includes(phrase)) { score = 300; where = 'body'; }
-    else if (it._no.includes(phrase)) { score = 120; where = 'ocr'; }
+    const t = it._nt, b = it._nb, o = it._no;
+    // A: 검색어 전체가 이어서 나옴 → B: 모든 낱말이 들어 있음 → C: 일부 낱말만 (C는 따로 묶어 아래에)
+    if (phrase && t.includes(phrase)) text.push({ it, where: 'title', score: 500, tier: 'A' });
+    else if (phrase && b.includes(phrase)) text.push({ it, where: 'body', score: 300, tier: 'A' });
+    else if (phrase && o.includes(phrase)) text.push({ it, where: 'ocr', score: 120, tier: 'A' });
     else if (toks.length > 1) {
-      const all = it._nt + '\n' + it._nb, allo = all + '\n' + it._no;
-      if (toks.every((t) => all.includes(t))) { score = 60; where = 'body'; }
-      else if (toks.every((t) => allo.includes(t))) { score = 30; where = 'ocr'; }
+      const tb = t + '\n' + b;
+      if (toks.every((x) => tb.includes(x))) text.push({ it, where: 'body', score: 60, tier: 'B' });
+      else if (toks.every((x) => (tb + '\n' + o).includes(x))) text.push({ it, where: 'ocr', score: 30, tier: 'B' });
+      else {                              // OCR은 일부 일치에는 쓰지 않는다(잡음이 많음)
+        const n = toks.filter((x) => tb.includes(x)).length;
+        if (n) part.push({ it, where: 'body', score: n * 10 + toks.filter((x) => t.includes(x)).length, tier: 'C' });
+      }
     }
-    if (score) text.push({ it, where, score });
   }
   text.sort((a, b) => b.score - a.score || a.it._i - b.it._i);
-  return { exact, text, re: hlRegex(q), art };
+  part.sort((a, b) => b.score - a.score || a.it._i - b.it._i);
+  return { exact, text, part, re: hlRegex(q), reP: hlRegex(q, true), art };
 }
 function snippet(it, where, re) {
   const src = where === 'ocr' ? it.ocr : it.body;
@@ -161,7 +179,9 @@ function resultRow(r, re) {
   const it = r.it, law = S.lawById.get(it.law);
   const tag = r.where === 'ocr' ? `<span class="tag">${it.kind === '세부지침' ? '표 안 텍스트' : '별표 OCR 검색'}</span>` : '';
   const variant = it.variant ? `<span class="tag">${esc(it.variant)}</span>` : '';
-  const sn = r.where === 'no' ? esc((it.body || '').replace(/\n/g, ' ').slice(0, 90)) : snippet(it, r.where === 'title' ? 'body' : r.where, re);
+  // 표 형식 별표의 OCR 글자는 검색에만 쓰고 미리보기에는 보이지 않는다(쪽수만)
+  const sn = r.where === 'ocr' ? `<span class="pg">${esc(pageLabel(it))}</span>`
+    : r.where === 'no' ? esc((it.body || '').replace(/\n/g, ' ').slice(0, 90)) : snippet(it, r.where === 'title' ? 'body' : r.where, re);
   return `<button class="item${S.cur === it.id ? ' sel' : ''}" data-id="${it.id}">
     <div class="l1"><span class="badge k-${it.kind}">${it.kind}</span><span>${esc(law.short)}</span>${tag}${variant}</div>
     <div class="l2">${it.no ? `<span class="no">${mark(it.no, r.where === 'no' ? null : re)}</span>` : ''}${mark(it.title, re)}</div>
@@ -171,15 +191,22 @@ function renderList() {
   const el = $('#list');
   const res = S.results = search();
   if (res) {
-    const total = res.exact.length + res.text.length;
-    if (!total) { el.innerHTML = `<div class="empty">“${esc(S.q)}” 검색 결과가 없습니다.<br><small>띄어쓰기는 무시하고 찾습니다. 필터를 ‘전체’로 바꿔 보세요.</small></div>`; return; }
+    const total = res.exact.length + res.text.length + res.part.length;
+    if (!total) { el.innerHTML = `<div class="empty">“${esc(S.q)}” 검색 결과가 없습니다.<br><small>띄어쓰기·가운뎃점·괄호 속 한자는 무시하고 찾습니다. 필터를 ‘전체’로 바꿔 보세요.</small></div>`; return; }
+    const rf = (r) => resultRow(r, r.tier === 'A' ? res.reP : res.re);
     let h = '';
     if (res.exact.length) {
       h += `<div class="sec">조번호 일치 ${res.exact.length}건</div>` + res.exact.map((r) => resultRow(r, res.re)).join('');
       if (res.text.length) h += `<div class="sec">본문에서 “${esc(S.q)}” 언급 ${res.text.length.toLocaleString()}건</div>`;
-    } else h += `<div class="count">검색 결과 ${total.toLocaleString()}건</div>`;
-    h += res.text.slice(0, S.limit).map((r) => resultRow(r, res.re)).join('');
+    } else if (res.text.length || !res.part.length) h += `<div class="count">검색 결과 ${res.text.length.toLocaleString()}건</div>`;
+    else h += `<div class="count">“${esc(S.q)}” 낱말이 모두 들어간 결과는 없습니다.</div>`;
+    h += res.text.slice(0, S.limit).map(rf).join('');
     if (res.text.length > S.limit) h += `<button class="more" id="more">더 보기 (${(res.text.length - S.limit).toLocaleString()}건 남음)</button>`;
+    if (res.part.length) {
+      h += `<button class="sec part toggle" id="togPart" aria-expanded="${S.partOpen}">${S.partOpen ? '▾' : '▸'} 일부 낱말만 맞는 결과 ${res.part.length.toLocaleString()}건 <small>(${S.partOpen ? '눌러서 접기' : '눌러서 펼치기'})</small></button>`;
+      if (S.partOpen) h += res.part.slice(0, S.limitP).map(rf).join('');
+      if (S.partOpen && res.part.length > S.limitP) h += `<button class="more" id="moreP">더 보기 (${(res.part.length - S.limitP).toLocaleString()}건 남음)</button>`;
+    }
     el.innerHTML = h;
     return;
   }
@@ -307,7 +334,7 @@ function renderDetail() {
   const it = S.cur && S.byId.get(S.cur);
   if (!it) {
     el.innerHTML = `<div class="welcome"><p><b>친환경농업 법령 검색</b></p><p>왼쪽에서 검색하거나 법령을 골라 조문을 여세요.</p>
-      <p class="small">키워드는 띄어쓰기를 무시하고 찾습니다.<br>“제19조”, “시행규칙 별표 4”처럼 조번호로도 찾을 수 있습니다.</p></div>`;
+      <p class="small">키워드는 띄어쓰기·가운뎃점·괄호 속 한자를 무시하고 찾습니다.<br>“제19조”, “시행규칙 별표 4”처럼 조번호로도 찾을 수 있습니다.</p></div>`;
     return;
   }
   const law = S.lawById.get(it.law), guide = it.kind === '세부지침';
@@ -345,11 +372,8 @@ function renderDetail() {
         : it.hd ? '표 형식 별표는 법령집 원문을 고해상도 이미지로 보여 줍니다. 두 손가락으로 벌리거나 이미지를 누르면 크게 볼 수 있습니다. 검색은 글자 인식(OCR) 결과로 하므로 일부 누락될 수 있습니다.'
           : '별표·서식은 법령집 쪽 이미지입니다. 검색은 글자 인식(OCR) 결과로 하므로 일부 누락될 수 있습니다.';
       h += `<p class="meta">${ocrNote}${it.hd ? '' : ' 이미지를 누르면 크게 볼 수 있습니다.'}</p>`;
-      if (re && it.ocr) {
-        const hits = [];
-        const flat = it.ocr.split('\n');
-        for (const line of flat) { re.lastIndex = 0; if (re.test(line)) { hits.push(line); if (hits.length >= 6) break; } }
-        if (hits.length) h += `<div class="ocrBox"><h3>검색어가 들어 있는 줄 (${guide ? '표 안 텍스트' : 'OCR'})</h3>${hits.map((x) => `<p>${mark(x, re)}</p>`).join('')}</div>`;
+      if (it.ocr) {                       // 글자 인식(OCR) 결과: 기본은 숨김, 눌렀을 때만 보임
+        h += `<details class="orig ocrd"><summary>글자 인식 결과 보기 <small>자동 인식이라 틀린 글자가 있을 수 있음</small></summary>${it.ocr.split('\n').filter((x) => x.trim()).map((x) => `<p>${mark(x, re)}</p>`).join('')}</details>`;
       }
       h += figs;
     }
@@ -377,7 +401,18 @@ async function doCopy(it) {
   }
   toast('복사했습니다');
 }
-function toast(msg) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => { t.hidden = true; }, 1600); }
+function toast(msg, ms) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => { t.hidden = true; }, ms || 1600); }
+function renderChangelog() {
+  const el = $('#changelog'); if (!el) return;
+  el.innerHTML = (VER.changelog || []).map((c) => `<div class="cl"><b>${esc(c.version)}</b> <span class="muted">${esc(c.date)}</span><ul>${c.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></div>`).join('');
+}
+function checkUpdated() {                 // 새 버전으로 처음 열렸을 때 잠깐 알린다
+  if (!VER.version) return;
+  let prev = store.get('ver', null);
+  if (prev === null) { try { if (localStorage.length > 0) prev = '1.0.0'; } catch (e) { /* 저장 불가 */ } }   // 버전 기록 도입 전부터 쓰던 사람
+  store.set('ver', VER.version);
+  if (prev && prev !== VER.version) toast(`${VER.version}으로 업데이트되었습니다`, 3500);
+}
 
 /* ───────── 이동(해시 라우팅) ───────── */
 function go(id, replace) {
@@ -484,18 +519,20 @@ async function downloadImages() {
 function bind() {
   let timer;
   $('#q').value = S.q;
-  $('#q').addEventListener('input', (e) => { clearTimeout(timer); timer = setTimeout(() => { S.q = e.target.value; S.limit = 60; renderList(); $('#list').scrollTop = 0; }, 140); });
+  $('#q').addEventListener('input', (e) => { clearTimeout(timer); timer = setTimeout(() => { S.q = e.target.value; S.limit = 60; S.limitP = 15; S.partOpen = false; renderList(); $('#list').scrollTop = 0; }, 140); });
   $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
   $('#kindChips').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
-    S.kind = b.dataset.kind; S.limit = 60;
+    S.kind = b.dataset.kind; S.limit = 60; S.limitP = 15; S.partOpen = false;
     document.querySelectorAll('#kindChips button').forEach((x) => x.classList.toggle('on', x === b));
     if (S.law && S.kind && S.lawById.get(S.law).kind !== S.kind) { S.law = ''; $('#lawSel').value = ''; }
     renderList();
   });
-  $('#lawSel').addEventListener('change', (e) => { S.law = e.target.value; S.limit = 60; renderList(); $('#list').scrollTop = 0; });
+  $('#lawSel').addEventListener('change', (e) => { S.law = e.target.value; S.limit = 60; S.limitP = 15; S.partOpen = false; renderList(); $('#list').scrollTop = 0; });
   $('#list').addEventListener('click', (e) => {
     const more = e.target.closest('#more'); if (more) { S.limit += 100; renderList(); return; }
+    const tog = e.target.closest('#togPart'); if (tog) { S.partOpen = !S.partOpen; renderList(); return; }
+    const moreP = e.target.closest('#moreP'); if (moreP) { S.limitP += 60; renderList(); return; }
     const lw = e.target.closest('[data-law]'); if (lw) { S.law = lw.dataset.law; $('#lawSel').value = S.law; renderList(); $('#list').scrollTop = 0; return; }
     const b = e.target.closest('[data-id]'); if (b) go(b.dataset.id, !!S.cur && matchMedia('(min-width: 600px)').matches);
   });
